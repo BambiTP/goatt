@@ -1,0 +1,356 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Go Tourney Control Panel</title>
+<style>
+  * { box-sizing: border-box; }
+  body { font-family: system-ui, sans-serif; background:#181818; color:#eee; margin:0; padding:20px 24px 60px; }
+  h1 { font-size:20px; margin:0 0 4px; }
+  h2 { font-size:15px; margin:28px 0 10px; color:#ddd; border-bottom:1px solid #333; padding-bottom:6px; }
+  .sub { color:#999; font-size:13px; margin-bottom:20px; }
+  .panel { background:#222; border:1px solid #333; border-radius:8px; padding:16px 18px; }
+  .row { display:flex; flex-wrap:wrap; gap:10px 22px; align-items:center; margin-bottom:14px; }
+  .chk { display:flex; align-items:center; gap:5px; font-size:13px; background:#2a2a2a; padding:5px 9px; border-radius:5px; cursor:pointer; user-select:none; }
+  .chk input { cursor:pointer; }
+  label.field { font-size:13px; color:#ccc; display:flex; align-items:center; gap:8px; }
+  input[type=number] { width:60px; background:#111; color:#eee; border:1px solid #444; border-radius:4px; padding:4px 6px; }
+  button { padding:8px 18px; cursor:pointer; background:#3a6; border:none; color:#fff; border-radius:5px; font-size:14px; font-weight:600; }
+  button:disabled { background:#555; cursor:default; }
+  button.secondary { background:#444; font-weight:400; padding:5px 12px; font-size:12px; }
+  #estimate { font-size:12px; color:#999; }
+  #progressWrap { margin-top:10px; }
+  progress { width:100%; height:10px; }
+  #status { font-size:12px; color:#9c9; min-height:1.4em; margin-top:4px; }
+
+  .bar-row { display:grid; grid-template-columns:150px 1fr 110px; align-items:center; gap:10px; margin-bottom:6px; font-size:13px; }
+  .bar-track { background:#111; border-radius:4px; height:18px; overflow:hidden; }
+  .bar-fill { background:linear-gradient(90deg,#3a6,#6c9); height:100%; width:0%; transition:width .25s ease; }
+  .bar-name { color:#ddd; }
+  .bar-stat { color:#999; font-size:12px; text-align:right; }
+
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:5px 8px; border-bottom:1px solid #2c2c2c; }
+  th { color:#999; font-weight:500; }
+  .two-col { display:flex; gap:24px; flex-wrap:wrap; }
+  .two-col > div { flex:1; min-width:280px; }
+
+  select { background:#111; color:#eee; border:1px solid #444; border-radius:4px; padding:6px 8px; font-size:13px; }
+  #h2hResult { margin-top:14px; font-size:13px; }
+  #h2hGames a { color:#8cf; text-decoration:none; }
+  #h2hGames a:hover { text-decoration:underline; }
+  #h2hGames li { margin-bottom:3px; }
+  .empty-note { color:#777; font-size:13px; font-style:italic; }
+</style>
+</head>
+<body>
+
+<h1>Go Tourney Control Panel</h1>
+<div class="sub">9x9 Go, teams of 2 alternating moves, fixed simple strategies. Everything runs locally in this tab - no server.</div>
+
+<div class="panel">
+  <div class="row" id="strategyChecks"></div>
+  <div class="row">
+    <label class="field">Trials per matchup <input type="number" id="trialsInput" value="2" min="1" max="50"></label>
+    <label class="chk"><input type="checkbox" id="mixedToggle"> Mixed teammates (pair different strategies on one team)</label>
+    <span id="estimate"></span>
+  </div>
+  <div class="row">
+    <button id="runBtn">Run Test</button>
+    <button id="stopBtn" class="secondary" disabled>Stop</button>
+  </div>
+  <div id="progressWrap">
+    <progress id="progress" value="0" max="1"></progress>
+    <div id="status">Idle.</div>
+  </div>
+</div>
+
+<h2>Live win rate by strategy</h2>
+<div id="bars" class="panel"><div class="empty-note">Run a test to see bars.</div></div>
+
+<h2>Best &amp; worst teammate pairings</h2>
+<div class="two-col">
+  <div class="panel">
+    <strong>Best teammates</strong>
+    <table id="bestTeammates"><tbody></tbody></table>
+  </div>
+  <div class="panel">
+    <strong>Worst teammates</strong>
+    <table id="worstTeammates"><tbody></tbody></table>
+  </div>
+</div>
+<div class="empty-note" id="teammateNote" style="margin-top:8px;">Enable "Mixed teammates" and run to see pairing synergy - with it off, every team is two copies of the same strategy, so there's nothing to rank.</div>
+
+<h2>Head-to-head: any two teams</h2>
+<div class="panel">
+  <div class="row">
+    <label class="field">Team A <select id="teamASelect"></select></label>
+    <label class="field">Team B <select id="teamBSelect"></select></label>
+  </div>
+  <div id="h2hResult" class="empty-note">Run a test, then pick two teams.</div>
+  <ul id="h2hGames"></ul>
+</div>
+
+<script src="lib/board.js"></script>
+<script src="lib/strategies.js"></script>
+<script src="lib/match.js"></script>
+<script>
+'use strict';
+const { STRATEGIES } = GoTourney;
+const { playMatch } = GoTourney;
+const STRATEGY_NAMES = Object.keys(STRATEGIES);
+
+// ---- strategy checkboxes ----
+const checksEl = document.getElementById('strategyChecks');
+for (const name of STRATEGY_NAMES) {
+  const label = document.createElement('label');
+  label.className = 'chk';
+  label.innerHTML = `<input type="checkbox" id="chk_${name}" checked> ${name}`;
+  checksEl.appendChild(label);
+}
+
+function selectedStrategies() {
+  return STRATEGY_NAMES.filter((n) => document.getElementById('chk_' + n).checked);
+}
+
+function uniquePairs(names) {
+  const teams = [];
+  for (let i = 0; i < names.length; i++) {
+    for (let j = i; j < names.length; j++) teams.push([names[i], names[j]]);
+  }
+  return teams;
+}
+function sameTeams(names) { return names.map((n) => [n, n]); }
+
+function teamKey(team) { return [...team].sort().join('+'); }
+function teamLabel(team) { return team[0] === team[1] ? team[0] : `${team[0]} + ${team[1]}`; }
+
+function planTeams() {
+  const selected = selectedStrategies();
+  const mixed = document.getElementById('mixedToggle').checked;
+  return mixed ? uniquePairs(selected) : sameTeams(selected);
+}
+
+function updateEstimate() {
+  const teams = planTeams();
+  const trials = parseInt(document.getElementById('trialsInput').value, 10) || 1;
+  const total = teams.length * teams.length * trials;
+  document.getElementById('estimate').textContent =
+    `${teams.length} team(s) -> ${total} games (~${Math.max(1, Math.round(total * 0.27))}s)`;
+}
+document.getElementById('mixedToggle').addEventListener('change', updateEstimate);
+document.getElementById('trialsInput').addEventListener('input', updateEstimate);
+checksEl.addEventListener('change', updateEstimate);
+updateEstimate();
+
+// ---- run state ----
+let running = false;
+let perStrategy = {};   // name -> {wins, games}
+let perTeamPair = {};   // key -> {label, wins, games}
+let allGames = [];      // full results, for head-to-head + replay download
+let lastTeams = [];
+
+function resetState(teams) {
+  perStrategy = {};
+  for (const n of STRATEGY_NAMES) perStrategy[n] = { wins: 0, games: 0 };
+  perTeamPair = {};
+  allGames = [];
+  lastTeams = teams;
+}
+
+function recordResult(result, blackTeam, whiteTeam) {
+  const blackWon = result.winner === result.blackName;
+  const whiteWon = result.winner === result.whiteName;
+
+  for (const n of new Set(result.blackStrategies)) {
+    perStrategy[n].games++;
+    if (blackWon) perStrategy[n].wins++;
+  }
+  for (const n of new Set(result.whiteStrategies)) {
+    perStrategy[n].games++;
+    if (whiteWon) perStrategy[n].wins++;
+  }
+
+  for (const [team, won] of [[blackTeam, blackWon], [whiteTeam, whiteWon]]) {
+    const key = teamKey(team);
+    if (!perTeamPair[key]) perTeamPair[key] = { label: teamLabel(team), wins: 0, games: 0 };
+    perTeamPair[key].games++;
+    if (won) perTeamPair[key].wins++;
+  }
+
+  allGames.push({
+    blackTeam, whiteTeam,
+    blackKey: teamKey(blackTeam), whiteKey: teamKey(whiteTeam),
+    blackName: result.blackName, whiteName: result.whiteName,
+    winner: result.winner, blackScore: result.score.black, whiteScore: result.score.white,
+    moveCount: result.moveCount, full: result,
+  });
+}
+
+// ---- live bars ----
+function renderBars() {
+  const el = document.getElementById('bars');
+  const names = STRATEGY_NAMES.filter((n) => perStrategy[n] && perStrategy[n].games > 0);
+  if (!names.length) { el.innerHTML = '<div class="empty-note">Run a test to see bars.</div>'; return; }
+  names.sort((a, b) => (perStrategy[b].wins / perStrategy[b].games) - (perStrategy[a].wins / perStrategy[a].games));
+  el.innerHTML = '';
+  for (const name of names) {
+    const { wins, games } = perStrategy[name];
+    const pct = games ? (wins / games) * 100 : 0;
+    const row = document.createElement('div');
+    row.className = 'bar-row';
+    row.innerHTML = `
+      <div class="bar-name">${name}</div>
+      <div class="bar-track"><div class="bar-fill" style="width:${pct.toFixed(1)}%"></div></div>
+      <div class="bar-stat">${pct.toFixed(1)}% (${wins}/${games})</div>`;
+    el.appendChild(row);
+  }
+}
+
+// ---- best/worst teammates ----
+function renderTeammateTables() {
+  const entries = Object.values(perTeamPair).filter((e) => e.games > 0);
+  const note = document.getElementById('teammateNote');
+  note.style.display = document.getElementById('mixedToggle').checked ? 'none' : 'block';
+
+  entries.sort((a, b) => (b.wins / b.games) - (a.wins / a.games));
+  const best = entries.slice(0, 6);
+  const worst = entries.slice().reverse().slice(0, 6);
+
+  const fill = (id, list) => {
+    const tbody = document.querySelector('#' + id + ' tbody');
+    tbody.innerHTML = list.map((e) => {
+      const pct = ((e.wins / e.games) * 100).toFixed(1);
+      return `<tr><td>${e.label}</td><td>${pct}%</td><td>${e.wins}/${e.games}</td></tr>`;
+    }).join('') || '<tr><td class="empty-note">No data yet</td></tr>';
+  };
+  fill('bestTeammates', best);
+  fill('worstTeammates', worst);
+}
+
+// ---- head-to-head ----
+function populateHeadToHeadDropdowns() {
+  const keys = [...new Set(lastTeams.map(teamKey))].sort();
+  const labelOf = (k) => {
+    const t = lastTeams.find((team) => teamKey(team) === k);
+    return t ? teamLabel(t) : k;
+  };
+  for (const id of ['teamASelect', 'teamBSelect']) {
+    const sel = document.getElementById(id);
+    sel.innerHTML = keys.map((k) => `<option value="${k}">${labelOf(k)}</option>`).join('');
+  }
+  if (keys.length > 1) document.getElementById('teamBSelect').selectedIndex = 1;
+  renderHeadToHead();
+}
+
+function renderHeadToHead() {
+  const a = document.getElementById('teamASelect').value;
+  const b = document.getElementById('teamBSelect').value;
+  const resultEl = document.getElementById('h2hResult');
+  const gamesEl = document.getElementById('h2hGames');
+  if (!a || !b) { resultEl.textContent = 'Run a test, then pick two teams.'; gamesEl.innerHTML = ''; return; }
+
+  const games = allGames.filter((g) =>
+    (g.blackKey === a && g.whiteKey === b) || (g.blackKey === b && g.whiteKey === a));
+
+  if (!games.length) {
+    resultEl.textContent = 'These two teams never played each other in the last run.';
+    gamesEl.innerHTML = '';
+    return;
+  }
+
+  let winsA = 0, winsB = 0, draws = 0, marginSum = 0;
+  for (const g of games) {
+    const aIsBlack = g.blackKey === a;
+    const aName = aIsBlack ? g.blackName : g.whiteName;
+    const bName = aIsBlack ? g.whiteName : g.blackName;
+    if (g.winner === aName) winsA++;
+    else if (g.winner === bName) winsB++;
+    else draws++;
+    marginSum += Math.abs(g.blackScore - g.whiteScore);
+  }
+  resultEl.innerHTML = `<strong>${games.length}</strong> games &mdash; A won ${winsA}, B won ${winsB}, draws ${draws}. Avg margin ${(marginSum / games.length).toFixed(1)}.`;
+
+  gamesEl.innerHTML = games.map((g, i) => {
+    const label = `${g.blackName} (B) vs ${g.whiteName} (W) &rarr; ${g.winner}, ${g.blackScore}-${g.whiteScore}, ${g.moveCount} moves`;
+    return `<li>${label} &mdash; <a href="#" data-idx="${allGames.indexOf(g)}" class="dl-link">download replay</a></li>`;
+  }).join('');
+  gamesEl.querySelectorAll('.dl-link').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      e.preventDefault();
+      const g = allGames[parseInt(a.dataset.idx, 10)];
+      downloadGame(g.full);
+    });
+  });
+}
+
+document.getElementById('teamASelect').addEventListener('change', renderHeadToHead);
+document.getElementById('teamBSelect').addEventListener('change', renderHeadToHead);
+
+function downloadGame(full) {
+  const blob = new Blob([JSON.stringify(full)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `game_${full.blackName}_vs_${full.whiteName}_seed${full.seed}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+// ---- run loop ----
+async function runTournament() {
+  const selected = selectedStrategies();
+  if (!selected.length) { alert('Select at least one strategy.'); return; }
+  const trials = parseInt(document.getElementById('trialsInput').value, 10) || 1;
+  const teams = planTeams();
+
+  resetState(teams);
+  renderBars();
+  renderTeammateTables();
+  running = true;
+  document.getElementById('runBtn').disabled = true;
+  document.getElementById('stopBtn').disabled = false;
+
+  const jobs = [];
+  let seed = 1;
+  for (const blackTeam of teams) {
+    for (const whiteTeam of teams) {
+      for (let t = 0; t < trials; t++) jobs.push({ blackTeam, whiteTeam, seed: seed++ });
+    }
+  }
+  const progress = document.getElementById('progress');
+  const status = document.getElementById('status');
+  progress.max = jobs.length;
+  progress.value = 0;
+
+  const BATCH = 15;
+  let i = 0;
+  const start = performance.now();
+  while (i < jobs.length && running) {
+    const end = Math.min(i + BATCH, jobs.length);
+    for (; i < end; i++) {
+      const { blackTeam, whiteTeam, seed: s } = jobs[i];
+      const result = playMatch({ blackTeam, whiteTeam, seed: s });
+      recordResult(result, blackTeam, whiteTeam);
+    }
+    progress.value = i;
+    status.textContent = `${i}/${jobs.length} games (${((performance.now() - start) / 1000).toFixed(1)}s)`;
+    renderBars();
+    renderTeammateTables();
+    await new Promise((r) => setTimeout(r, 0));
+  }
+
+  status.textContent = running
+    ? `Done: ${jobs.length} games in ${((performance.now() - start) / 1000).toFixed(1)}s.`
+    : `Stopped after ${i}/${jobs.length} games.`;
+  running = false;
+  document.getElementById('runBtn').disabled = false;
+  document.getElementById('stopBtn').disabled = true;
+  populateHeadToHeadDropdowns();
+}
+
+document.getElementById('runBtn').addEventListener('click', runTournament);
+document.getElementById('stopBtn').addEventListener('click', () => { running = false; });
+</script>
+</body>
+</html>

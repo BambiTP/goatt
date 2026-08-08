@@ -1,0 +1,183 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Go Tourney Replay</title>
+<style>
+  body { font-family: system-ui, sans-serif; background:#1b1b1b; color:#eee; display:flex; flex-direction:column; align-items:center; padding:20px; }
+  #board { background:#dcb35c; border-radius:4px; }
+  .controls { margin-top:12px; display:flex; gap:8px; align-items:center; }
+  button { padding:6px 14px; cursor:pointer; background:#3a6; border:none; color:#fff; border-radius:5px; font-weight:600; }
+  #info { margin-top:8px; font-size:14px; min-height:1.4em; }
+  #dropzone { border:2px dashed #555; padding:20px; border-radius:8px; margin-bottom:16px; text-align:center; font-size:13px; color:#ccc; }
+  #dropzone.drag { border-color:#4af; }
+  #meta { font-size:13px; color:#aaa; margin-top:6px; text-align:center; }
+  input[type=range] { width:320px; }
+</style>
+</head>
+<body>
+<h2>Go Tourney Replay</h2>
+<div id="dropzone">Drop a downloaded game JSON here, or <input type="file" id="fileInput" accept="application/json"></div>
+<svg id="board" width="480" height="480"></svg>
+<div class="controls">
+  <button id="first">|&lt;</button>
+  <button id="prev">&lt; Prev</button>
+  <button id="play">Play</button>
+  <button id="next">Next &gt;</button>
+  <button id="last">&gt;|</button>
+  <input type="range" id="slider" min="0" max="0" value="0">
+</div>
+<div id="info"></div>
+<div id="meta"></div>
+
+<script>
+const SIZE = 9;
+const MARGIN = 30;
+const CELL = (480 - MARGIN * 2) / (SIZE - 1);
+
+const svg = document.getElementById('board');
+const info = document.getElementById('info');
+const meta = document.getElementById('meta');
+const slider = document.getElementById('slider');
+
+let game = null;
+let cursor = 0;
+let playing = null;
+
+function px(coord) { return MARGIN + coord * CELL; }
+
+function drawGrid() {
+  svg.innerHTML = '';
+  for (let i = 0; i < SIZE; i++) {
+    const h = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    h.setAttribute('x1', px(0)); h.setAttribute('x2', px(SIZE - 1));
+    h.setAttribute('y1', px(i)); h.setAttribute('y2', px(i));
+    h.setAttribute('stroke', '#333');
+    svg.appendChild(h);
+
+    const v = document.createElementNS('http://www.w3.org/2000/svg', 'line');
+    v.setAttribute('y1', px(0)); v.setAttribute('y2', px(SIZE - 1));
+    v.setAttribute('x1', px(i)); v.setAttribute('x2', px(i));
+    v.setAttribute('stroke', '#333');
+    svg.appendChild(v);
+  }
+}
+
+function render() {
+  drawGrid();
+  if (!game) return;
+
+  const grid = new Array(SIZE * SIZE).fill(0);
+  const agentAt = {};
+  let lastMove = null;
+
+  for (let i = 0; i < cursor; i++) {
+    const mv = game.moves[i];
+    if (mv.pass) continue;
+    grid[mv.y * SIZE + mv.x] = mv.color;
+    agentAt[mv.x + ',' + mv.y] = mv.agent;
+    if (mv.captured) {
+      for (const [cx, cy] of mv.captured) {
+        grid[cy * SIZE + cx] = 0;
+        delete agentAt[cx + ',' + cy];
+      }
+    }
+    lastMove = mv;
+  }
+
+  for (let y = 0; y < SIZE; y++) {
+    for (let x = 0; x < SIZE; x++) {
+      const c = grid[y * SIZE + x];
+      if (!c) continue;
+
+      const circle = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+      circle.setAttribute('cx', px(x));
+      circle.setAttribute('cy', px(y));
+      circle.setAttribute('r', CELL * 0.42);
+      circle.setAttribute('fill', c === 1 ? '#111' : '#f5f5f5');
+      circle.setAttribute('stroke', '#000');
+      svg.appendChild(circle);
+
+      const agent = agentAt[x + ',' + y];
+      if (agent) {
+        const label = document.createElementNS('http://www.w3.org/2000/svg', 'text');
+        label.setAttribute('x', px(x));
+        label.setAttribute('y', px(y) + 4);
+        label.setAttribute('text-anchor', 'middle');
+        label.setAttribute('font-size', '11');
+        label.setAttribute('fill', c === 1 ? '#f5f5f5' : '#111');
+        label.textContent = agent.slice(1);
+        svg.appendChild(label);
+      }
+
+      if (lastMove && !lastMove.pass && lastMove.x === x && lastMove.y === y) {
+        const marker = document.createElementNS('http://www.w3.org/2000/svg', 'circle');
+        marker.setAttribute('cx', px(x));
+        marker.setAttribute('cy', px(y));
+        marker.setAttribute('r', CELL * 0.15);
+        marker.setAttribute('fill', 'none');
+        marker.setAttribute('stroke', '#e33');
+        marker.setAttribute('stroke-width', '2');
+        svg.appendChild(marker);
+      }
+    }
+  }
+
+  slider.max = game.moves.length;
+  slider.value = cursor;
+
+  if (cursor === 0) {
+    info.textContent = 'Start of game';
+  } else {
+    const mv = game.moves[cursor - 1];
+    const teamLabel = mv.agent[0] === 'A' ? 'Black team' : 'White team';
+    const who = `${teamLabel} agent ${mv.agent.slice(1)} (${mv.agent})`;
+    info.textContent = mv.pass
+      ? `Move ${mv.moveNumber}: ${who} passes`
+      : `Move ${mv.moveNumber}: ${who} plays (${mv.x}, ${mv.y})` + (mv.captured && mv.captured.length ? `, captures ${mv.captured.length}` : '');
+  }
+}
+
+function loadGame(data) {
+  game = data;
+  cursor = 0;
+  meta.textContent = `${data.blackName} (Black, team A) vs ${data.whiteName} (White, team B) — winner: ${data.winner}, score B:${data.score.black} W:${data.score.white}, ${data.moves.length} moves`;
+  render();
+}
+
+document.getElementById('fileInput').addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  file.text().then((t) => loadGame(JSON.parse(t)));
+});
+
+const dropzone = document.getElementById('dropzone');
+dropzone.addEventListener('dragover', (e) => { e.preventDefault(); dropzone.classList.add('drag'); });
+dropzone.addEventListener('dragleave', () => dropzone.classList.remove('drag'));
+dropzone.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dropzone.classList.remove('drag');
+  const file = e.dataTransfer.files[0];
+  if (!file) return;
+  file.text().then((t) => loadGame(JSON.parse(t)));
+});
+
+document.getElementById('first').onclick = () => { cursor = 0; render(); };
+document.getElementById('prev').onclick = () => { cursor = Math.max(0, cursor - 1); render(); };
+document.getElementById('next').onclick = () => { if (game) cursor = Math.min(game.moves.length, cursor + 1); render(); };
+document.getElementById('last').onclick = () => { if (game) cursor = game.moves.length; render(); };
+slider.addEventListener('input', () => { cursor = parseInt(slider.value, 10); render(); });
+
+document.getElementById('play').onclick = (e) => {
+  if (playing) { clearInterval(playing); playing = null; e.target.textContent = 'Play'; return; }
+  e.target.textContent = 'Pause';
+  playing = setInterval(() => {
+    if (!game || cursor >= game.moves.length) { clearInterval(playing); playing = null; document.getElementById('play').textContent = 'Play'; return; }
+    cursor++; render();
+  }, 400);
+};
+
+drawGrid();
+</script>
+</body>
+</html>
